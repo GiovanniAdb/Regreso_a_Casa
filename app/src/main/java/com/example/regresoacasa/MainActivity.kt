@@ -1,31 +1,49 @@
 package com.example.regresoacasa
-
-import android.location.Location
+import android.Manifest
+import android.content.pm.PackageManager
+import android.graphics.Color
+import android.location.LocationManager
 import android.os.Bundle
-import android.os.Handler
-import android.telecom.Call
+import android.text.TextUtils
+import android.widget.Button
+import android.widget.EditText
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import com.android.volley.Request
+import com.android.volley.RequestQueue
 import com.android.volley.Response
+import com.android.volley.toolbox.StringRequest
+import com.android.volley.toolbox.Volley
+import org.json.JSONObject
 import org.osmdroid.api.IMapController
+import org.osmdroid.config.Configuration
+import org.osmdroid.events.MapEventsReceiver
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
-import org.osmdroid.views.overlay.mylocation.GpsMyLocationProvider
-import org.osmdroid.views.overlay.mylocation.MyLocationNewOverlay
+import org.osmdroid.views.overlay.Marker
+import org.osmdroid.views.overlay.Polyline
 
-class MainActivity : AppCompatActivity() {
-
+class MainActivity : AppCompatActivity(), MapEventsReceiver {
     private lateinit var mapView: MapView
     private lateinit var mapController: IMapController
-    private lateinit var locationOverlay: MyLocationNewOverlay
-
-    private lateinit var routeManager: RouteManager
-    private lateinit var startLocation: Location
-    private lateinit var endLocation: GeoPoint
+    private lateinit var locationManager: LocationManager
+    private lateinit var requestQueue: RequestQueue
+    private lateinit var homeAddressEditText: EditText
+    private lateinit var buttonGetRoute: Button
+    private lateinit var currentLocation: GeoPoint
+    private lateinit var homeLocation: GeoPoint
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Inicializar la configuración de osmdroid
+        val ctx = applicationContext
+        Configuration.getInstance()
+            .load(ctx, androidx.preference.PreferenceManager.getDefaultSharedPreferences(ctx))
+
         setContentView(R.layout.activity_main)
 
         mapView = findViewById(R.id.map_view)
@@ -35,73 +53,110 @@ class MainActivity : AppCompatActivity() {
 
         mapController = mapView.controller
 
-        locationOverlay = MyLocationNewOverlay(GpsMyLocationProvider(this), mapView)
-        locationOverlay.enableMyLocation()
-        locationOverlay.enableFollowLocation()
-        mapView.overlays.add(locationOverlay)
+        // Obtener referencias a los componentes de la vista
+        homeAddressEditText = findViewById(R.id.destiny)
+        buttonGetRoute = findViewById(R.id.btn_get_directions)
 
-        val homeLocation = Location("")
-        homeLocation.latitude = YOUR_HOME_LATITUDE
-        homeLocation.longitude = YOUR_HOME_LONGITUDE
+        locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
+        requestQueue = Volley.newRequestQueue(this)
 
-        endLocation = GeoPoint(homeLocation.latitude, homeLocation.longitude)
+        // Agregar el listener para el botón de obtener ruta
+        buttonGetRoute.setOnClickListener {
+            getRoute()
+        }
 
-        routeManager = RouteManager()
+        // Comprobar los permisos de ubicación
+        if (ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) != PackageManager.PERMISSION_GRANTED &&
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                ),
+                1
+            )
+            return
+        }
 
-        startLocation = locationOverlay.myLocation
+        // Obtener la última ubicación conocida del proveedor de ubicación GPS
+        locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER)?.let {
+            currentLocation = GeoPoint(it.latitude, it.longitude)
+            mapController.setZoom(15.0)
+            mapController.setCenter(currentLocation)
+            val currentLocationMarker = Marker(mapView)
+            currentLocationMarker.position = currentLocation
+            currentLocationMarker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+            mapView.overlays.add(currentLocationMarker)
+        }
+    }
 
-        val handler = Handler()
-        val runnable = object : Runnable {
-            override fun run() {
-                val newLocation = locationOverlay.myLocation
-                if (newLocation != null) {
-                    startLocation = newLocation
-                    drawRoute()
-                }
-                handler.postDelayed(this, 5000)
+    private fun getRoute() {
+        // Verificar que la dirección esté configurada
+        if (TextUtils.isEmpty(homeAddressEditText.toString())) {
+            Toast.makeText(this, "Por favor, configure la dirección de destino en la configuración", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // Verificar que tengamos la ubicación actual del usuario
+        if (currentLocation == null) {
+            Toast.makeText(this, "No se puede obtener la ubicación actual", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // Construir la URL de la API de directions de OpenRouteService
+        val API_KEY = "5b3ce3597851110001cf624868f24090014d479a85093aac8026fa62"
+        val url = "https://api.openrouteservice.org/v2/directions/driving-car?api_key=$API_KEY&start=${currentLocation!!.latitude},${currentLocation!!.longitude}&end=$homeAddressEditText"
+
+        // Crear la solicitud HTTP para obtener la ruta
+        val request = object : StringRequest(Request.Method.GET, url, Response.Listener { response ->
+            // Procesar la respuesta de la API de directions
+            val route = JSONObject(response).getJSONArray("features").getJSONObject(0).getJSONObject("geometry").getJSONArray("coordinates")
+
+            // Crear una lista de puntos para la ruta
+            val points = ArrayList<GeoPoint>()
+            for (i in 0 until route.length()) {
+                val point = route.getJSONArray(i)
+                val lat = point.getDouble(1)
+                val lon = point.getDouble(0)
+                points.add(GeoPoint(lat, lon))
+            }
+
+            // Agregar la ruta al mapa en forma de una Polyline
+            val line = Polyline()
+            line.setPoints(points)
+            line.width = 8f
+            line.color = Color.RED
+            mapView.overlayManager.add(line)
+            mapView.invalidate()
+        }, Response.ErrorListener { error ->
+            Toast.makeText(this, "Error al obtener la ruta: ${error.message}", Toast.LENGTH_SHORT).show()
+        }) {
+            // Agregar la cabecera de autorización a la solicitud HTTP
+            override fun getHeaders(): MutableMap<String, String> {
+                val headers = HashMap<String, String>()
+                headers["Authorization"] = API_KEY
+                return headers
             }
         }
-        handler.post(runnable)
+
+        // Agregar la solicitud HTTP a la cola de solicitudes
+        requestQueue.add(request)
     }
 
-    private fun drawRoute() {
-        routeManager.getRoute(startLocation, "${endLocation.latitude},${endLocation.longitude}", object : Callback<RouteResponse> {
-            override fun onResponse(call: Call<RouteResponse>, response: Response<RouteResponse>) {
-                if (response.isSuccessful) {
-                    val routeResponse = response.body()
-                    val routePoints = decodePolyline(routeResponse?.routes?.get(0)?.geometry)
-                    val routeLine = Polyline(mapView)
-                    routeLine.setPoints(routePoints)
-                    routeLine.paint.color = Color.RED
-                    mapView.overlays.add(routeLine)
-                    mapController.setCenter(routePoints[0])
-                    mapController.setZoom(15.0)
-                }
-            }
-
-            override fun onFailure(call: Call<RouteResponse>, t: Throwable) {
-                Toast.makeText(this@MainActivity, "Error al obtener la ruta", Toast.LENGTH_SHORT).show()
-            }
-        })
+    override fun singleTapConfirmedHelper(p: GeoPoint?): Boolean {
+        TODO("Not yet implemented")
     }
 
-    private fun decodePolyline(polyline: String?): List<GeoPoint> {
-        val decodedPoints = PolylineDecoder().decode(polyline)
-        return decodedPoints.map { GeoPoint(it.latitude, it.longitude) }
-    }
-
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        locationOverlay.onRequestPermissionsResult(requestCode, permissions, grantResults)
-    }
-
-    override fun onResume() {
-        super.onResume()
-        mapView.onResume()
-    }
-
-    override fun onPause() {
-        super.onPause()
-        mapView.onPause()
+    override fun longPressHelper(p: GeoPoint?): Boolean {
+        // TODO: handle long press event on map
+        return true
     }
 }
